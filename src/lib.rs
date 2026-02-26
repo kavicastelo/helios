@@ -6,6 +6,7 @@
 
 pub mod event;
 pub mod eventlog;
+pub mod explorer;
 pub mod network;
 pub mod node;
 pub mod scheduler;
@@ -15,6 +16,7 @@ pub mod time;
 // Re-exports for convenience.
 pub use event::{Event, EventId, EventIdGen, EventType};
 pub use eventlog::{Checkpoint, EventLog};
+pub use explorer::{Choice, ExplorationResult, Explorer, NamedProperty, Property, Violation};
 pub use network::{DeterministicRng, Network, NetworkConfig, NetworkDecision};
 pub use node::{
     EchoNode, MessagePayload, NodeEvent, NodeId, NodeRuntime, PingNode, SimNode, TraceEntry,

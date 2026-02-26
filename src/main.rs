@@ -1,16 +1,16 @@
 use helios::{
-    EchoNode, EventType, MessagePayload, Network, NetworkConfig,
+    Choice, EchoNode, EventType, Explorer, MessagePayload, Network, NetworkConfig,
     NodeId, NodeRuntime, PingNode, Simulation, VirtualTime,
 };
 
 fn main() {
     println!("═══════════════════════════════════════════════════════");
     println!("  Helios — Deterministic Distributed Runtime");
-    println!("  Batch 5: Forkable Execution Demo");
+    println!("  Batch 6: State Space Exploration Demo");
     println!("═══════════════════════════════════════════════════════");
     println!();
 
-    // ── Setup a simulation with 3 nodes ───────────────────────
+    // ── Setup base simulation ─────────────────────────────────
     let net = Network::new(NetworkConfig::reliable(), 42);
     let mut sim = Simulation::new();
     sim.enable_logging();
@@ -23,88 +23,83 @@ fn main() {
     rt.register(n1, Box::new(EchoNode::new(n1)));
     rt.register(n2, Box::new(EchoNode::new(n2)));
 
-    // Send initial messages.
+    // Base traffic.
     sim.schedule(
-        VirtualTime::new(0),
+        VirtualTime::new(10),
         EventType::MessageSend {
             from: n0,
             to: n1,
-            payload: MessagePayload::Text("hello-n1".into()),
+            payload: MessagePayload::Text("ping-n1".into()),
         },
     );
     sim.schedule(
-        VirtualTime::new(0),
+        VirtualTime::new(10),
         EventType::MessageSend {
             from: n0,
             to: n2,
-            payload: MessagePayload::Text("hello-n2".into()),
+            payload: MessagePayload::Text("ping-n2".into()),
         },
     );
-    sim.run(&mut rt);
 
-    let pre_fork_msgs = rt.node::<PingNode>(n0).unwrap().received.len();
-    println!("  Pre-fork: N0 received {} echoes", pre_fork_msgs);
-    println!("  Forking into two branches...");
-    println!();
+    // ── Explore: crash n1, crash n2, and partition — 8 branches ─
+    let mut explorer = Explorer::new(sim, rt);
 
-    // ── Branch A: normal operation ────────────────────────────
-    let mut sim_a = sim.fork();
-    let mut rt_a = rt.fork();
-    sim_a.schedule(
-        VirtualTime::new(10),
-        EventType::MessageSend {
-            from: n0,
-            to: n1,
-            payload: MessagePayload::Text("branch-a-msg".into()),
-        },
-    );
-    sim_a.run(&mut rt_a);
-
-    let a_msgs = rt_a.node::<PingNode>(n0).unwrap().received.len();
-    let a_events = sim_a.event_log().unwrap().len();
-    let a_hash = sim_a.event_log().unwrap().log_hash();
-
-    // ── Branch B: n1 crashes → message lost ───────────────────
-    let mut sim_b = sim.fork();
-    let mut rt_b = rt.fork();
-    sim_b.schedule(
+    explorer.add_choice(Choice::binary(
+        "crash n1 at T=5",
         VirtualTime::new(5),
         EventType::NodeCrash { node: n1 },
-    );
-    sim_b.schedule(
-        VirtualTime::new(10),
-        EventType::MessageSend {
-            from: n0,
-            to: n1,
-            payload: MessagePayload::Text("branch-b-msg".into()),
-        },
-    );
-    sim_b.run(&mut rt_b);
+    ));
+    explorer.add_choice(Choice::binary(
+        "crash n2 at T=5",
+        VirtualTime::new(5),
+        EventType::NodeCrash { node: n2 },
+    ));
+    explorer.add_choice(Choice::binary(
+        "partition n0↔n1 at T=3",
+        VirtualTime::new(3),
+        EventType::NetworkPartition { a: n0, b: n1 },
+    ));
 
-    let b_msgs = rt_b.node::<PingNode>(n0).unwrap().received.len();
-    let b_events = sim_b.event_log().unwrap().len();
-    let b_hash = sim_b.event_log().unwrap().log_hash();
+    // Safety property: n0 must receive at least 1 echo.
+    explorer.check("at least 1 echo", move |_sim, rt| {
+        let ping = rt.node::<PingNode>(n0).unwrap();
+        if ping.received.is_empty() {
+            Err(format!(
+                "N0 received 0 echoes (expected ≥1)"
+            ))
+        } else {
+            Ok(())
+        }
+    });
 
-    // ── Print results ─────────────────────────────────────────
-    println!("  Branch A (normal):");
-    println!("    N0 echoes: {}", a_msgs);
-    println!("    Events:    {}", a_events);
-    println!("    Log hash:  {:016x}", a_hash);
+    println!("  Exploring {} branches...", explorer.total_branches());
+    let result = explorer.explore();
+
+    println!("  Branches explored: {}", result.branches_explored);
+    println!("  Violations found:  {}", result.violation_count());
     println!();
-    println!("  Branch B (n1 crashed):");
-    println!("    N0 echoes: {}", b_msgs);
-    println!("    Events:    {}", b_events);
-    println!("    Log hash:  {:016x}", b_hash);
-    println!();
 
-    if a_hash != b_hash {
-        println!("  ✓ Branches diverged — different log hashes (expected).");
+    if result.is_safe() {
+        println!("  ✓ All branches satisfy all properties.");
     } else {
-        println!("  ✗ Branches should have diverged!");
+        for v in &result.violations {
+            println!("  ✗ Violation: \"{}\"", v.property);
+            println!("    Message: {}", v.message);
+            print!("    Choices: ");
+            let choice_strs: Vec<String> = v
+                .choices
+                .iter()
+                .map(|(label, opt)| {
+                    format!(
+                        "{}={}",
+                        label,
+                        if *opt == 0 { "skip" } else { "apply" }
+                    )
+                })
+                .collect();
+            println!("{}", choice_strs.join(", "));
+            println!();
+        }
     }
-    if a_msgs > b_msgs {
-        println!("  ✓ Branch A received more echoes than B (crash effect).");
-    }
-    println!();
-    println!("  ✓ Forkable execution demo complete.");
+    println!("  ✓ State space exploration complete.");
 }
