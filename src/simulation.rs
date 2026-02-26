@@ -158,6 +158,24 @@ impl Simulation {
         self.scheduler.schedule(at, payload)
     }
 
+    /// Fork this simulation: clone the scheduler (with all pending events),
+    /// current time, and event log.
+    ///
+    /// The forked simulation starts from the exact same state and can be
+    /// run independently with a different handler or different injected
+    /// events, enabling what-if analysis and speculative branching.
+    ///
+    /// **Note:** You must also fork the `NodeRuntime` separately
+    /// (via `NodeRuntime::fork()`) to get a complete independent branch.
+    pub fn fork(&self) -> Self {
+        Simulation {
+            scheduler: self.scheduler.clone(),
+            current_time: self.current_time,
+            events_processed: self.events_processed,
+            event_log: self.event_log.clone(),
+        }
+    }
+
     /// Execute a single step: pop one event, advance time, dispatch.
     ///
     /// Returns `Some(event)` if an event was processed, `None` if the

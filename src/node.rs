@@ -95,6 +95,9 @@ pub trait SimNode {
     fn state_hash(&self) -> u64 {
         0
     }
+
+    /// Create a boxed clone of this node (dyn-safe cloning for fork).
+    fn clone_node(&self) -> Box<dyn SimNode>;
 }
 
 // ── SimulationContext node extensions ─────────────────────────────────
@@ -217,6 +220,25 @@ impl NodeRuntime {
             nodes: BTreeMap::new(),
             alive: BTreeSet::new(),
             network: Some(network),
+            trace: Vec::new(),
+        }
+    }
+
+    /// Fork this runtime: deep-clone all nodes, alive set, and network.
+    ///
+    /// The forked runtime has an empty trace (divergent execution
+    /// starts fresh). This is the foundation for speculative branching
+    /// and what-if analysis.
+    pub fn fork(&self) -> Self {
+        let cloned_nodes: BTreeMap<NodeId, Box<dyn SimNode>> = self
+            .nodes
+            .iter()
+            .map(|(id, node)| (*id, node.clone_node()))
+            .collect();
+        NodeRuntime {
+            nodes: cloned_nodes,
+            alive: self.alive.clone(),
+            network: self.network.clone(),
             trace: Vec::new(),
         }
     }
@@ -439,6 +461,12 @@ impl SimNode for EchoNode {
     fn state_hash(&self) -> u64 {
         hash_combine(self.id.raw(), self.echo_count)
     }
+    fn clone_node(&self) -> Box<dyn SimNode> {
+        Box::new(EchoNode {
+            id: self.id,
+            echo_count: self.echo_count,
+        })
+    }
 }
 
 // ── Example: PingNode ─────────────────────────────────────────────────
@@ -485,6 +513,12 @@ impl SimNode for PingNode {
             });
         }
         h
+    }
+    fn clone_node(&self) -> Box<dyn SimNode> {
+        Box::new(PingNode {
+            id: self.id,
+            received: self.received.clone(),
+        })
     }
 }
 
@@ -679,6 +713,12 @@ mod tests {
             }
             fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
                 self
+            }
+            fn clone_node(&self) -> Box<dyn SimNode> {
+                Box::new(TimerNode {
+                    id: self.id,
+                    timer_fired_at: self.timer_fired_at,
+                })
             }
         }
 
@@ -958,5 +998,228 @@ mod tests {
         );
         // Verify we actually had some events.
         assert!(!run1.is_empty(), "Should have processed some events");
+    }
+
+    // ── Batch 5: Fork tests ──────────────────────────────────────
+
+    #[test]
+    fn test_fork_basic() {
+        let mut sim = Simulation::new();
+        let mut rt = NodeRuntime::new();
+
+        let n0 = NodeId::new(0);
+        let n1 = NodeId::new(1);
+
+        rt.register(n0, Box::new(PingNode::new(n0)));
+        rt.register(n1, Box::new(EchoNode::new(n1)));
+
+        // Send a message and process it.
+        sim.schedule(
+            VirtualTime::new(0),
+            EventType::MessageDelivery {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("before-fork".into()),
+            },
+        );
+        sim.run(&mut rt);
+
+        // n1 echoed → n0 received 1 message.
+        let ping = rt.node::<PingNode>(n0).unwrap();
+        assert_eq!(ping.received.len(), 1);
+
+        // Fork.
+        let mut sim_fork = sim.fork();
+        let mut rt_fork = rt.fork();
+
+        // Verify fork has the same node state.
+        let ping_fork = rt_fork.node::<PingNode>(n0).unwrap();
+        assert_eq!(ping_fork.received.len(), 1);
+
+        // Fork trace is reset.
+        assert!(rt_fork.trace.is_empty());
+
+        // Send another message only on the fork.
+        sim_fork.schedule(
+            VirtualTime::new(5),
+            EventType::MessageDelivery {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("fork-only".into()),
+            },
+        );
+        sim_fork.run(&mut rt_fork);
+
+        // Fork received second echo.
+        let ping_fork = rt_fork.node::<PingNode>(n0).unwrap();
+        assert_eq!(ping_fork.received.len(), 2);
+
+        // Original is unchanged.
+        let ping_orig = rt.node::<PingNode>(n0).unwrap();
+        assert_eq!(ping_orig.received.len(), 1);
+    }
+
+    #[test]
+    fn test_fork_divergent_execution() {
+        let mut sim = Simulation::new();
+        let mut rt = NodeRuntime::new();
+
+        let n0 = NodeId::new(0);
+        let n1 = NodeId::new(1);
+        rt.register(n0, Box::new(PingNode::new(n0)));
+        rt.register(n1, Box::new(EchoNode::new(n1)));
+
+        // Seed a message for T=5.
+        sim.schedule(
+            VirtualTime::new(5),
+            EventType::MessageDelivery {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("shared".into()),
+            },
+        );
+
+        // Fork BEFORE running — both have the same pending event.
+        let mut sim_a = sim.fork();
+        let mut rt_a = rt.fork();
+        let mut sim_b = sim.fork();
+        let mut rt_b = rt.fork();
+
+        // Branch A: inject a crash at T=0 (before delivery at T=5).
+        sim_a.schedule(
+            VirtualTime::new(0),
+            EventType::NodeCrash { node: n1 },
+        );
+
+        sim_a.run(&mut rt_a);
+        sim_b.run(&mut rt_b);
+
+        // Branch A: n1 crashed at T=0, message at T=5 dropped → no echo.
+        let ping_a = rt_a.node::<PingNode>(n0).unwrap();
+        assert_eq!(ping_a.received.len(), 0);
+
+        // Branch B: n1 alive, message at T=5 → echo at T=6.
+        let ping_b = rt_b.node::<PingNode>(n0).unwrap();
+        assert_eq!(ping_b.received.len(), 1);
+    }
+
+    #[test]
+    fn test_fork_with_network() {
+        use crate::network::{Network, NetworkConfig};
+
+        let net = Network::new(NetworkConfig::reliable(), 42);
+        let mut sim = Simulation::new();
+        let mut rt = NodeRuntime::with_network(net);
+
+        let n0 = NodeId::new(0);
+        let n1 = NodeId::new(1);
+        rt.register(n0, Box::new(PingNode::new(n0)));
+        rt.register(n1, Box::new(EchoNode::new(n1)));
+
+        // Run one send through the network.
+        sim.schedule(
+            VirtualTime::new(0),
+            EventType::MessageSend {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("pre-fork".into()),
+            },
+        );
+        sim.run(&mut rt);
+
+        // Fork.
+        let mut sim_fork = sim.fork();
+        let mut rt_fork = rt.fork();
+
+        // Partition n0↔n1 on the fork only.
+        rt_fork.network_mut().unwrap().add_partition(n0, n1);
+
+        // Send on both.
+        sim.schedule(
+            VirtualTime::new(10),
+            EventType::MessageSend {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("after".into()),
+            },
+        );
+        sim_fork.schedule(
+            VirtualTime::new(10),
+            EventType::MessageSend {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("after".into()),
+            },
+        );
+
+        sim.run(&mut rt);
+        sim_fork.run(&mut rt_fork);
+
+        // Original: 2 echoes (pre-fork + after).
+        let orig = rt.node::<PingNode>(n0).unwrap();
+        assert_eq!(orig.received.len(), 2);
+
+        // Fork: 1 echo (pre-fork only — "after" was partitioned).
+        let fork = rt_fork.node::<PingNode>(n0).unwrap();
+        assert_eq!(fork.received.len(), 1);
+    }
+
+    #[test]
+    fn test_fork_log_hash_divergence() {
+        let mut sim = Simulation::new();
+        sim.enable_logging();
+        let mut rt = NodeRuntime::new();
+
+        let n0 = NodeId::new(0);
+        let n1 = NodeId::new(1);
+        rt.register(n0, Box::new(PingNode::new(n0)));
+        rt.register(n1, Box::new(EchoNode::new(n1)));
+
+        sim.schedule(
+            VirtualTime::new(0),
+            EventType::MessageDelivery {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("seed".into()),
+            },
+        );
+        sim.run(&mut rt);
+
+        let hash_pre_fork = sim.event_log().unwrap().log_hash();
+
+        // Fork and add different events.
+        let mut sim_a = sim.fork();
+        let mut rt_a = rt.fork();
+        sim_a.schedule(
+            VirtualTime::new(10),
+            EventType::MessageDelivery {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("branch-a".into()),
+            },
+        );
+        sim_a.run(&mut rt_a);
+
+        let mut sim_b = sim.fork();
+        let mut rt_b = rt.fork();
+        sim_b.schedule(
+            VirtualTime::new(10),
+            EventType::MessageDelivery {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("branch-b".into()),
+            },
+        );
+        sim_b.run(&mut rt_b);
+
+        let hash_a = sim_a.event_log().unwrap().log_hash();
+        let hash_b = sim_b.event_log().unwrap().log_hash();
+
+        // Pre-fork logs should share the same prefix.
+        // But divergent events make the full hashes different.
+        assert_ne!(hash_a, hash_b, "Divergent branches should have different log hashes");
+        // Both had 3 events: seed msg + echo + branch-specific msg + echo = 4
+        assert_eq!(sim_a.event_log().unwrap().len(), 4);
+        assert_eq!(sim_b.event_log().unwrap().len(), 4);
     }
 }
