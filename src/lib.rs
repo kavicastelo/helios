@@ -4,6 +4,7 @@
 //! systems with full determinism. No async, no threads, no wall-clock
 //! time — just pure state machines driven by a virtual clock.
 
+pub mod api;
 pub mod dsl;
 pub mod event;
 pub mod eventlog;
@@ -13,6 +14,9 @@ pub mod node;
 pub mod scheduler;
 pub mod simulation;
 pub mod time;
+
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 // Re-exports for convenience.
 pub use event::{Event, EventId, EventIdGen, EventType};

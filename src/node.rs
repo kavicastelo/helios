@@ -278,6 +278,11 @@ impl NodeRuntime {
     pub fn network_mut(&mut self) -> Option<&mut Network> {
         self.network.as_mut()
     }
+
+    /// Return all registered node IDs in deterministic order.
+    pub fn all_node_ids(&self) -> Vec<NodeId> {
+        self.nodes.keys().copied().collect()
+    }
 }
 
 impl Default for NodeRuntime {
