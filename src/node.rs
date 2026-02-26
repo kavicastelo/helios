@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{Event, EventId, EventType};
+use crate::eventlog::hash_combine;
 use crate::network::{Network, NetworkDecision};
 use crate::simulation::{EventHandler, SimulationContext};
 use crate::time::VirtualTime;
@@ -88,6 +89,12 @@ pub trait SimNode {
     /// Downcast support for test inspection.
     fn as_any(&self) -> &dyn std::any::Any;
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
+    /// Return a deterministic hash of the node's current state.
+    /// Used for checkpoint validation during replay.
+    fn state_hash(&self) -> u64 {
+        0
+    }
 }
 
 // ── SimulationContext node extensions ─────────────────────────────────
@@ -384,6 +391,19 @@ impl EventHandler for NodeRuntime {
             EventType::Noop | EventType::Log(_) => {}
         }
     }
+
+    fn compute_state_hash(&self) -> u64 {
+        let mut h: u64 = 0;
+        for (id, node) in &self.nodes {
+            h = hash_combine(h, id.raw());
+            h = hash_combine(h, node.state_hash());
+        }
+        // Include alive status.
+        for id in &self.alive {
+            h = hash_combine(h, id.raw().wrapping_add(1));
+        }
+        h
+    }
 }
 
 // ── Example: EchoNode ─────────────────────────────────────────────────
@@ -416,6 +436,9 @@ impl SimNode for EchoNode {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+    fn state_hash(&self) -> u64 {
+        hash_combine(self.id.raw(), self.echo_count)
+    }
 }
 
 // ── Example: PingNode ─────────────────────────────────────────────────
@@ -447,6 +470,21 @@ impl SimNode for PingNode {
     }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+    fn state_hash(&self) -> u64 {
+        use crate::eventlog::hash_bytes;
+        let mut h = self.id.raw();
+        h = hash_combine(h, self.received.len() as u64);
+        for (time, from, payload) in &self.received {
+            h = hash_combine(h, time.ticks());
+            h = hash_combine(h, from.raw());
+            h = hash_combine(h, match payload {
+                MessagePayload::Empty => 0,
+                MessagePayload::Text(s) => hash_bytes(s.as_bytes()),
+                MessagePayload::Data(d) => hash_bytes(d),
+            });
+        }
+        h
     }
 }
 

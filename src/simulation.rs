@@ -5,6 +5,7 @@
 /// single-threaded — determinism is trivial.
 
 use crate::event::{Event, EventId, EventType};
+use crate::eventlog::EventLog;
 use crate::scheduler::Scheduler;
 use crate::time::VirtualTime;
 
@@ -18,6 +19,13 @@ use crate::time::VirtualTime;
 pub trait EventHandler {
     /// Called for every dispatched event.
     fn handle(&mut self, ctx: &mut SimulationContext, event: &Event);
+
+    /// Compute a deterministic hash of the handler's current state.
+    /// Used for checkpoint validation during event-sourced replay.
+    /// Default returns 0 (no-op).
+    fn compute_state_hash(&self) -> u64 {
+        0
+    }
 }
 
 /// A handler backed by a closure — useful for tests and one-off scripts.
@@ -84,18 +92,19 @@ impl<'a> SimulationContext<'a> {
     }
 }
 
-// ── Simulation ────────────────────────────────────────────────────────
-
 /// Top-level simulation driver.
 ///
 /// Owns the scheduler and tracks the current virtual time.
 /// Call `run` to execute until the queue is drained, or
 /// `step` to advance by exactly one event.
-#[derive(Debug, Clone)]
+///
+/// When event logging is enabled, every dispatched event is recorded
+/// in an append-only `EventLog` for replay and verification.
 pub struct Simulation {
     scheduler: Scheduler,
     current_time: VirtualTime,
     events_processed: u64,
+    event_log: Option<EventLog>,
 }
 
 impl Simulation {
@@ -105,7 +114,28 @@ impl Simulation {
             scheduler: Scheduler::new(),
             current_time: VirtualTime::ZERO,
             events_processed: 0,
+            event_log: None,
         }
+    }
+
+    /// Enable event logging (append-only event recording).
+    pub fn enable_logging(&mut self) {
+        self.event_log = Some(EventLog::new());
+    }
+
+    /// Enable event logging with automatic checkpointing every `n` events.
+    pub fn enable_logging_with_checkpoints(&mut self, interval: u64) {
+        self.event_log = Some(EventLog::with_checkpoint_interval(interval));
+    }
+
+    /// Access the event log (if enabled).
+    pub fn event_log(&self) -> Option<&EventLog> {
+        self.event_log.as_ref()
+    }
+
+    /// Take ownership of the event log.
+    pub fn take_event_log(&mut self) -> Option<EventLog> {
+        self.event_log.take()
     }
 
     /// Access the scheduler directly (e.g., for initial event seeding).
@@ -144,6 +174,17 @@ impl Simulation {
         );
         self.current_time = event.scheduled_at;
         self.events_processed += 1;
+
+        // Record in event log if enabled.
+        if let Some(ref mut log) = self.event_log {
+            log.record(event.clone());
+
+            // Auto-checkpoint if interval reached.
+            if log.should_checkpoint(self.events_processed) {
+                let hash = handler.compute_state_hash();
+                log.add_checkpoint(self.events_processed, self.current_time, hash);
+            }
+        }
 
         let mut ctx = SimulationContext {
             scheduler: &mut self.scheduler,
