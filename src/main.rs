@@ -1,92 +1,59 @@
-use helios::{
-    Choice, EchoNode, EventType, Explorer, MessagePayload, Network, NetworkConfig,
-    NodeId, NodeRuntime, PingNode, Simulation, VirtualTime,
-};
+use helios::dsl::{ScenarioBuilder, SimulationBuilder};
+use helios::{NodeId, PingNode};
 
 fn main() {
     println!("═══════════════════════════════════════════════════════");
     println!("  Helios — Deterministic Distributed Runtime");
-    println!("  Batch 6: State Space Exploration Demo");
+    println!("  Batch 7: DSL Layer Demo");
     println!("═══════════════════════════════════════════════════════");
     println!();
 
-    // ── Setup base simulation ─────────────────────────────────
-    let net = Network::new(NetworkConfig::reliable(), 42);
-    let mut sim = Simulation::new();
-    sim.enable_logging();
-    let mut rt = NodeRuntime::with_network(net);
+    // ── Before DSL (verbose) vs After DSL (concise) ───────────
+    println!("  ┌─ Step 1: Build a 3-node simulation (1 line chain) ─┐");
+    println!();
 
-    let n0 = NodeId::new(0);
-    let n1 = NodeId::new(1);
-    let n2 = NodeId::new(2);
-    rt.register(n0, Box::new(PingNode::new(n0)));
-    rt.register(n1, Box::new(EchoNode::new(n1)));
-    rt.register(n2, Box::new(EchoNode::new(n2)));
+    let (sim, rt) = SimulationBuilder::new()
+        .ping(0)
+        .echo(1)
+        .echo(2)
+        .reliable_network(42)
+        .with_checkpoints(5)
+        .send(0, 1, "hello-n1", 10)
+        .send(0, 2, "hello-n2", 10)
+        .build();
 
-    // Base traffic.
-    sim.schedule(
-        VirtualTime::new(10),
-        EventType::MessageSend {
-            from: n0,
-            to: n1,
-            payload: MessagePayload::Text("ping-n1".into()),
-        },
-    );
-    sim.schedule(
-        VirtualTime::new(10),
-        EventType::MessageSend {
-            from: n0,
-            to: n2,
-            payload: MessagePayload::Text("ping-n2".into()),
-        },
-    );
+    println!("    Nodes: 3 (1 ping, 2 echo)");
+    println!("    Network: reliable, seed=42");
+    println!("    Messages: 2 sends at T=10");
+    println!();
 
-    // ── Explore: crash n1, crash n2, and partition — 8 branches ─
-    let mut explorer = Explorer::new(sim, rt);
+    // ── Step 2: Explore fault scenarios ────────────────────────
+    println!("  ┌─ Step 2: Explore fault space (fluent DSL) ─────────┐");
+    println!();
 
-    explorer.add_choice(Choice::binary(
-        "crash n1 at T=5",
-        VirtualTime::new(5),
-        EventType::NodeCrash { node: n1 },
-    ));
-    explorer.add_choice(Choice::binary(
-        "crash n2 at T=5",
-        VirtualTime::new(5),
-        EventType::NodeCrash { node: n2 },
-    ));
-    explorer.add_choice(Choice::binary(
-        "partition n0↔n1 at T=3",
-        VirtualTime::new(3),
-        EventType::NetworkPartition { a: n0, b: n1 },
-    ));
+    let result = ScenarioBuilder::new(sim, rt)
+        .maybe_crash(1, 5)
+        .maybe_crash(2, 5)
+        .maybe_partition(0, 1, 3)
+        .assert("liveness: ≥1 echo", |_sim, rt| {
+            let p = rt.node::<PingNode>(NodeId::new(0)).unwrap();
+            if p.received.is_empty() {
+                Err(format!("N0 got 0 echoes"))
+            } else {
+                Ok(())
+            }
+        })
+        .explore();
 
-    // Safety property: n0 must receive at least 1 echo.
-    explorer.check("at least 1 echo", move |_sim, rt| {
-        let ping = rt.node::<PingNode>(n0).unwrap();
-        if ping.received.is_empty() {
-            Err(format!(
-                "N0 received 0 echoes (expected ≥1)"
-            ))
-        } else {
-            Ok(())
-        }
-    });
-
-    println!("  Exploring {} branches...", explorer.total_branches());
-    let result = explorer.explore();
-
-    println!("  Branches explored: {}", result.branches_explored);
-    println!("  Violations found:  {}", result.violation_count());
+    println!("    Branches explored: {}", result.branches_explored);
+    println!("    Violations:        {}", result.violation_count());
     println!();
 
     if result.is_safe() {
-        println!("  ✓ All branches satisfy all properties.");
+        println!("    ✓ All branches safe.");
     } else {
         for v in &result.violations {
-            println!("  ✗ Violation: \"{}\"", v.property);
-            println!("    Message: {}", v.message);
-            print!("    Choices: ");
-            let choice_strs: Vec<String> = v
+            let choices: Vec<String> = v
                 .choices
                 .iter()
                 .map(|(label, opt)| {
@@ -97,9 +64,11 @@ fn main() {
                     )
                 })
                 .collect();
-            println!("{}", choice_strs.join(", "));
-            println!();
+            println!("    ✗ [{}] {}", v.property, v.message);
+            println!("      {}", choices.join(", "));
         }
     }
-    println!("  ✓ State space exploration complete.");
+
+    println!();
+    println!("  ✓ DSL demo complete.");
 }
