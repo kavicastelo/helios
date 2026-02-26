@@ -1185,7 +1185,7 @@ mod tests {
         );
         sim.run(&mut rt);
 
-        let hash_pre_fork = sim.event_log().unwrap().log_hash();
+        let _hash_pre_fork = sim.event_log().unwrap().log_hash();
 
         // Fork and add different events.
         let mut sim_a = sim.fork();
