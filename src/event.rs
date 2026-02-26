@@ -84,9 +84,10 @@ impl Default for EventIdGen {
 
 /// The payload of an event.
 ///
-/// System-level events (`Noop`, `Log`) plus node-directed events
-/// introduced in Batch 2 (`MessageDelivery`, `TimerFired`, `NodeCrash`,
-/// `NodeRecover`).
+/// System-level events (`Noop`, `Log`), node-directed events from Batch 2
+/// (`MessageDelivery`, `TimerFired`, `NodeCrash`, `NodeRecover`), and
+/// network-layer events from Batch 3 (`MessageSend`, `NetworkPartition`,
+/// `NetworkHeal`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventType {
     /// A no-op event used for testing and scheduling heartbeats.
@@ -95,7 +96,17 @@ pub enum EventType {
     /// A generic log / trace marker.
     Log(String),
 
-    /// A message traveling from one node to another.
+    /// Intent to send a message — processed by the network layer.
+    /// The network decides whether to deliver (scheduling `MessageDelivery`)
+    /// or drop the message.
+    MessageSend {
+        from: NodeId,
+        to: NodeId,
+        payload: MessagePayload,
+    },
+
+    /// A message that has passed through the network and is ready
+    /// for delivery to the target node.
     MessageDelivery {
         from: NodeId,
         to: NodeId,
@@ -117,6 +128,18 @@ pub enum EventType {
     NodeRecover {
         node: NodeId,
     },
+
+    /// Dynamically inject a network partition between two nodes.
+    NetworkPartition {
+        a: NodeId,
+        b: NodeId,
+    },
+
+    /// Heal a network partition between two nodes.
+    NetworkHeal {
+        a: NodeId,
+        b: NodeId,
+    },
 }
 
 impl std::fmt::Display for EventType {
@@ -124,14 +147,23 @@ impl std::fmt::Display for EventType {
         match self {
             EventType::Noop => write!(f, "Noop"),
             EventType::Log(msg) => write!(f, "Log({})", msg),
+            EventType::MessageSend { from, to, .. } => {
+                write!(f, "Send({} → {})", from, to)
+            }
             EventType::MessageDelivery { from, to, payload } => {
-                write!(f, "Msg({} → {}, {:?})", from, to, payload)
+                write!(f, "Deliver({} → {}, {:?})", from, to, payload)
             }
             EventType::TimerFired { node, timer_id } => {
                 write!(f, "Timer({}, #{})", node, timer_id)
             }
             EventType::NodeCrash { node } => write!(f, "Crash({})", node),
             EventType::NodeRecover { node } => write!(f, "Recover({})", node),
+            EventType::NetworkPartition { a, b } => {
+                write!(f, "Partition({} ↔ {})", a, b)
+            }
+            EventType::NetworkHeal { a, b } => {
+                write!(f, "Heal({} ↔ {})", a, b)
+            }
         }
     }
 }

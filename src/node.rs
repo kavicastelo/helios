@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::event::{Event, EventId, EventType};
+use crate::network::{Network, NetworkDecision};
 use crate::simulation::{EventHandler, SimulationContext};
 use crate::time::VirtualTime;
 
@@ -92,7 +93,27 @@ pub trait SimNode {
 // ── SimulationContext node extensions ─────────────────────────────────
 
 impl SimulationContext<'_> {
-    /// Schedule a message from `from` to `to` with the given `delay`.
+    /// Send a message through the network layer (two-phase delivery).
+    ///
+    /// Schedules a `MessageSend` event at the current time. The
+    /// `NodeRuntime` will pass it through the `Network` to decide
+    /// whether to deliver or drop, and with what latency.
+    pub fn send(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        payload: MessagePayload,
+    ) -> EventId {
+        self.schedule_after(
+            0,
+            EventType::MessageSend { from, to, payload },
+        )
+    }
+
+    /// Schedule a direct message delivery (bypasses network layer).
+    ///
+    /// Useful for tests that need predictable timing without
+    /// network interference.
     pub fn schedule_message(
         &mut self,
         from: NodeId,
@@ -130,6 +151,16 @@ impl SimulationContext<'_> {
     pub fn schedule_recover(&mut self, node_id: NodeId, delay: u64) -> EventId {
         self.schedule_after(delay, EventType::NodeRecover { node: node_id })
     }
+
+    /// Schedule a network partition injection.
+    pub fn schedule_partition(&mut self, a: NodeId, b: NodeId, delay: u64) -> EventId {
+        self.schedule_after(delay, EventType::NetworkPartition { a, b })
+    }
+
+    /// Schedule a network partition heal.
+    pub fn schedule_heal(&mut self, a: NodeId, b: NodeId, delay: u64) -> EventId {
+        self.schedule_after(delay, EventType::NetworkHeal { a, b })
+    }
 }
 
 // ── Trace Entry ───────────────────────────────────────────────────────
@@ -150,18 +181,35 @@ pub struct TraceEntry {
 /// Implements `EventHandler` so it can be passed directly to
 /// `Simulation::run`. Non-node events (`Noop`, `Log`) are silently
 /// ignored.
+///
+/// When a `Network` is attached, `MessageSend` events are processed
+/// through the network layer before delivery.
 pub struct NodeRuntime {
     nodes: BTreeMap<NodeId, Box<dyn SimNode>>,
     alive: BTreeSet<NodeId>,
+    /// Optional simulated network (Batch 3).
+    network: Option<Network>,
     /// Append-only trace of every dispatched node event.
     pub trace: Vec<TraceEntry>,
 }
 
 impl NodeRuntime {
+    /// Create a runtime without a network (direct delivery).
     pub fn new() -> Self {
         NodeRuntime {
             nodes: BTreeMap::new(),
             alive: BTreeSet::new(),
+            network: None,
+            trace: Vec::new(),
+        }
+    }
+
+    /// Create a runtime with a simulated network.
+    pub fn with_network(network: Network) -> Self {
+        NodeRuntime {
+            nodes: BTreeMap::new(),
+            alive: BTreeSet::new(),
+            network: Some(network),
             trace: Vec::new(),
         }
     }
@@ -190,6 +238,16 @@ impl NodeRuntime {
     /// Downcast a mutable node reference.
     pub fn node_mut<T: SimNode + 'static>(&mut self, id: NodeId) -> Option<&mut T> {
         self.nodes.get_mut(&id)?.as_any_mut().downcast_mut::<T>()
+    }
+
+    /// Access the network (if attached).
+    pub fn network(&self) -> Option<&Network> {
+        self.network.as_ref()
+    }
+
+    /// Mutable access to the network.
+    pub fn network_mut(&mut self) -> Option<&mut Network> {
+        self.network.as_mut()
     }
 }
 
@@ -269,6 +327,56 @@ impl EventHandler for NodeRuntime {
                         node_event: node_event.clone(),
                     });
                     n.on_event(ctx, node_event);
+                }
+            }
+
+            // ── Network-layer events (Batch 3) ──────────────────
+
+            EventType::MessageSend { from, to, payload } => {
+                let from = *from;
+                let to = *to;
+                let payload = payload.clone();
+
+                if let Some(ref mut network) = self.network {
+                    let decision = network.process(ctx.now, from, to);
+                    match decision {
+                        NetworkDecision::Delivered { latency } => {
+                            ctx.schedule_after(
+                                latency,
+                                EventType::MessageDelivery {
+                                    from,
+                                    to,
+                                    payload,
+                                },
+                            );
+                        }
+                        NetworkDecision::DroppedByChance
+                        | NetworkDecision::DroppedByPartition => {
+                            // Message lost — logged in network.log().
+                        }
+                    }
+                } else {
+                    // No network → immediate delivery (0 extra latency).
+                    ctx.schedule_after(
+                        0,
+                        EventType::MessageDelivery {
+                            from,
+                            to,
+                            payload,
+                        },
+                    );
+                }
+            }
+
+            EventType::NetworkPartition { a, b } => {
+                if let Some(ref mut network) = self.network {
+                    network.add_partition(*a, *b);
+                }
+            }
+
+            EventType::NetworkHeal { a, b } => {
+                if let Some(ref mut network) = self.network {
+                    network.remove_partition(*a, *b);
                 }
             }
 
@@ -614,5 +722,203 @@ mod tests {
         let run1 = run_trace();
         let run2 = run_trace();
         assert_eq!(run1, run2, "3-node simulation is not deterministic!");
+    }
+
+    // ── Batch 3: Network integration tests ────────────────────────
+
+    #[test]
+    fn test_send_through_network() {
+        use crate::network::{Network, NetworkConfig};
+
+        let net = Network::new(NetworkConfig::reliable(), 42);
+        let mut sim = Simulation::new();
+        let mut rt = NodeRuntime::with_network(net);
+
+        let n0 = NodeId::new(0);
+        let n1 = NodeId::new(1);
+
+        rt.register(n0, Box::new(PingNode::new(n0)));
+        rt.register(n1, Box::new(EchoNode::new(n1)));
+
+        // Send via MessageSend (goes through network).
+        sim.schedule(
+            VirtualTime::new(0),
+            EventType::MessageSend {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("net-hello".into()),
+            },
+        );
+
+        sim.run(&mut rt);
+
+        // Reliable network: base_latency=1, so delivery at T=1.
+        // EchoNode echoes with delay=1 (schedule_message), so echo at T=2.
+        let ping = rt.node::<PingNode>(n0).unwrap();
+        assert_eq!(ping.received.len(), 1);
+        assert_eq!(ping.received[0].0, VirtualTime::new(2));
+        assert_eq!(
+            ping.received[0].2,
+            MessagePayload::Text("net-hello".into())
+        );
+    }
+
+    #[test]
+    fn test_network_partition_blocks_messages() {
+        use crate::network::{Network, NetworkConfig};
+
+        let mut net = Network::new(NetworkConfig::reliable(), 42);
+        net.add_partition(NodeId::new(0), NodeId::new(1));
+
+        let mut sim = Simulation::new();
+        let mut rt = NodeRuntime::with_network(net);
+
+        let n0 = NodeId::new(0);
+        let n1 = NodeId::new(1);
+
+        rt.register(n0, Box::new(PingNode::new(n0)));
+        rt.register(n1, Box::new(EchoNode::new(n1)));
+
+        sim.schedule(
+            VirtualTime::new(0),
+            EventType::MessageSend {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("blocked".into()),
+            },
+        );
+
+        sim.run(&mut rt);
+
+        // Message was partitioned — n1 never received it.
+        let echo = rt.node::<EchoNode>(n1).unwrap();
+        assert_eq!(echo.echo_count, 0);
+
+        let ping = rt.node::<PingNode>(n0).unwrap();
+        assert_eq!(ping.received.len(), 0);
+
+        assert_eq!(rt.network().unwrap().dropped_count(), 1);
+    }
+
+    #[test]
+    fn test_dynamic_partition_and_heal() {
+        use crate::network::{Network, NetworkConfig};
+
+        let net = Network::new(NetworkConfig::reliable(), 42);
+        let mut sim = Simulation::new();
+        let mut rt = NodeRuntime::with_network(net);
+
+        let n0 = NodeId::new(0);
+        let n1 = NodeId::new(1);
+
+        rt.register(n0, Box::new(PingNode::new(n0)));
+        rt.register(n1, Box::new(EchoNode::new(n1)));
+
+        // T=0: send succeeds (no partition yet).
+        sim.schedule(
+            VirtualTime::new(0),
+            EventType::MessageSend {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("before".into()),
+            },
+        );
+        // T=5: inject partition.
+        sim.schedule(
+            VirtualTime::new(5),
+            EventType::NetworkPartition { a: n0, b: n1 },
+        );
+        // T=10: send fails (partitioned).
+        sim.schedule(
+            VirtualTime::new(10),
+            EventType::MessageSend {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("during".into()),
+            },
+        );
+        // T=15: heal partition.
+        sim.schedule(
+            VirtualTime::new(15),
+            EventType::NetworkHeal { a: n0, b: n1 },
+        );
+        // T=20: send succeeds again.
+        sim.schedule(
+            VirtualTime::new(20),
+            EventType::MessageSend {
+                from: n0,
+                to: n1,
+                payload: MessagePayload::Text("after".into()),
+            },
+        );
+
+        sim.run(&mut rt);
+
+        // n0 should receive 2 echoes (before + after), not 3.
+        let ping = rt.node::<PingNode>(n0).unwrap();
+        assert_eq!(ping.received.len(), 2);
+
+        let net = rt.network().unwrap();
+        assert_eq!(net.delivered_count(), 2);
+        assert_eq!(net.dropped_count(), 1);
+    }
+
+    #[test]
+    fn test_network_reproducibility() {
+        use crate::network::{Network, NetworkConfig};
+
+        fn run_with_chaos() -> Vec<(u64, u64, NodeId)> {
+            let net = Network::new(
+                NetworkConfig::lossy(3, 5, 0.3),
+                12345,
+            );
+            let mut sim = Simulation::new();
+            let mut rt = NodeRuntime::with_network(net);
+
+            let n0 = NodeId::new(0);
+            let n1 = NodeId::new(1);
+            let n2 = NodeId::new(2);
+
+            rt.register(n0, Box::new(PingNode::new(n0)));
+            rt.register(n1, Box::new(EchoNode::new(n1)));
+            rt.register(n2, Box::new(EchoNode::new(n2)));
+
+            for i in 0..20 {
+                sim.schedule(
+                    VirtualTime::new(i * 5),
+                    EventType::MessageSend {
+                        from: n0,
+                        to: if i % 2 == 0 { n1 } else { n2 },
+                        payload: MessagePayload::Text(format!("m{}", i)),
+                    },
+                );
+            }
+
+            // Dynamic partition mid-simulation.
+            sim.schedule(
+                VirtualTime::new(30),
+                EventType::NetworkPartition { a: n0, b: n1 },
+            );
+            sim.schedule(
+                VirtualTime::new(60),
+                EventType::NetworkHeal { a: n0, b: n1 },
+            );
+
+            sim.run(&mut rt);
+
+            rt.trace
+                .iter()
+                .map(|t| (t.time.ticks(), t.event_id.raw(), t.node))
+                .collect()
+        }
+
+        let run1 = run_with_chaos();
+        let run2 = run_with_chaos();
+        assert_eq!(
+            run1, run2,
+            "Network chaos simulation is not deterministic!"
+        );
+        // Verify we actually had some events.
+        assert!(!run1.is_empty(), "Should have processed some events");
     }
 }
