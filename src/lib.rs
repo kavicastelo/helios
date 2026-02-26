@@ -4,6 +4,7 @@
 //! systems with full determinism. No async, no threads, no wall-clock
 //! time — just pure state machines driven by a virtual clock.
 
+pub mod dsl;
 pub mod event;
 pub mod eventlog;
 pub mod explorer;
