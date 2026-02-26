@@ -242,6 +242,11 @@ impl Simulation {
     pub fn is_finished(&self) -> bool {
         self.scheduler.is_empty()
     }
+
+    /// Number of pending events in the scheduler.
+    pub fn pending_count(&self) -> usize {
+        self.scheduler.len()
+    }
 }
 
 impl Default for Simulation {

@@ -2,5 +2,17 @@
 name = "helios"
 version = "0.1.0"
 edition = "2021"
+description = "Deterministic distributed systems simulator"
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen", "dep:serde", "dep:serde_json", "dep:console_error_panic_hook"]
 
 [dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
