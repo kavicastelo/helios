@@ -35,6 +35,7 @@ pub fn hash_bytes(data: &[u8]) -> u64 {
 
 /// A snapshot of the simulation state at a point in time.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct Checkpoint {
     /// Number of events processed when this checkpoint was taken.
     pub event_index: u64,
@@ -48,6 +49,7 @@ pub struct Checkpoint {
 
 /// Append-only log of dispatched events with optional checkpointing.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct EventLog {
     events: Vec<Event>,
     checkpoints: Vec<Checkpoint>,

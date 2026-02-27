@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 /// two events scheduled at the same `VirtualTime` are ordered by their
 /// `EventId`, which corresponds to creation order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct EventId(u64);
 
 impl EventId {
@@ -46,6 +47,7 @@ impl std::fmt::Display for EventId {
 /// is single-threaded and there is no shared mutable state, the counter
 /// is trivially deterministic.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct EventIdGen {
     next: u64,
 }
@@ -89,6 +91,7 @@ impl Default for EventIdGen {
 /// network-layer events from Batch 3 (`MessageSend`, `NetworkPartition`,
 /// `NetworkHeal`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub enum EventType {
     /// A no-op event used for testing and scheduling heartbeats.
     Noop,
@@ -151,7 +154,7 @@ impl std::fmt::Display for EventType {
                 write!(f, "Send({} → {})", from, to)
             }
             EventType::MessageDelivery { from, to, payload } => {
-                write!(f, "Deliver({} → {}, {:?})", from, to, payload)
+                write!(f, "Deliver({} → {}, {})", from, to, payload)
             }
             EventType::TimerFired { node, timer_id } => {
                 write!(f, "Timer({}, #{})", node, timer_id)
@@ -176,6 +179,7 @@ impl std::fmt::Display for EventType {
 /// orders them by `(scheduled_at, id)` to guarantee deterministic
 /// processing order.
 #[derive(Debug, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct Event {
     /// Unique identifier (monotonically increasing).
     pub id: EventId,

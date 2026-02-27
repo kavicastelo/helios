@@ -59,6 +59,7 @@ impl DeterministicRng {
 
 /// Configuration for simulated network behavior.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct NetworkConfig {
     /// Fixed base latency (ticks) applied to every delivered message.
     pub base_latency: u64,
@@ -99,6 +100,7 @@ impl Default for NetworkConfig {
 
 /// The outcome of a network processing decision.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub enum NetworkDecision {
     /// Message will be delivered after `latency` ticks.
     Delivered { latency: u64 },
@@ -110,11 +112,35 @@ pub enum NetworkDecision {
 
 /// A log entry recording a network decision.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct NetworkLogEntry {
     pub time: VirtualTime,
     pub from: NodeId,
     pub to: NodeId,
     pub decision: NetworkDecision,
+}
+
+impl std::fmt::Display for NetworkDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetworkDecision::Delivered { latency } => write!(f, "Delivered(latency={})", latency),
+            NetworkDecision::DroppedByChance => write!(f, "DroppedByChance"),
+            NetworkDecision::DroppedByPartition => write!(f, "DroppedByPartition"),
+        }
+    }
+}
+
+impl std::fmt::Display for NetworkLogEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[T={}] {} → {}: {}",
+            self.time.ticks(),
+            self.from,
+            self.to,
+            self.decision,
+        )
+    }
 }
 
 // ── Network ───────────────────────────────────────────────────────────

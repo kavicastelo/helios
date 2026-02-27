@@ -8,6 +8,7 @@
 /// Intentionally *not* `Copy`-able to make accidental duplication visible,
 /// but we derive `Clone` so callers can be explicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct VirtualTime(u64);
 
 impl VirtualTime {

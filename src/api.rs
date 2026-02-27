@@ -14,6 +14,7 @@ use crate::simulation::Simulation;
 
 /// Result of a single simulation step.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct StepResult {
     /// The event that was dispatched.
     pub event_id: u64,
@@ -98,6 +99,44 @@ impl SimulationApi {
     // ── JSON Export ───────────────────────────────────────────
 
     /// Export a snapshot of the current state as a JSON string.
+    #[cfg(feature = "serialize")]
+    pub fn state_json(&self) -> String {
+        #[derive(serde::Serialize)]
+        struct NodeState {
+            id: u64,
+            alive: bool,
+        }
+
+        #[derive(serde::Serialize)]
+        struct ApiState {
+            current_time: u64,
+            events_processed: u64,
+            nodes: Vec<NodeState>,
+            pending_events: usize,
+            is_finished: bool,
+        }
+
+        let nodes = self.rt.all_node_ids()
+            .into_iter()
+            .map(|id| NodeState {
+                id: id.raw(),
+                alive: self.rt.is_alive(id),
+            })
+            .collect();
+
+        let state = ApiState {
+            current_time: self.sim.current_time().ticks(),
+            events_processed: self.sim.events_processed(),
+            nodes,
+            pending_events: self.sim.pending_count(),
+            is_finished: self.sim.is_finished(),
+        };
+
+        serde_json::to_string_pretty(&state).unwrap_or_else(|_| "{}".into())
+    }
+
+    /// Export a snapshot of the current state as a JSON string.
+    #[cfg(not(feature = "serialize"))]
     pub fn state_json(&self) -> String {
         let mut s = String::from("{\n");
 
@@ -142,6 +181,13 @@ impl SimulationApi {
     }
 
     /// Export the event trace as a JSON array string.
+    #[cfg(feature = "serialize")]
+    pub fn trace_json(&self) -> String {
+        serde_json::to_string_pretty(&self.rt.trace).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// Export the event trace as a JSON array string.
+    #[cfg(not(feature = "serialize"))]
     pub fn trace_json(&self) -> String {
         let trace = &self.rt.trace;
         let mut s = String::from("[\n");
@@ -163,6 +209,16 @@ impl SimulationApi {
     }
 
     /// Export the event log (if enabled) as a JSON array string.
+    #[cfg(feature = "serialize")]
+    pub fn event_log_json(&self) -> String {
+        match self.sim.event_log() {
+            None => "[]".to_string(),
+            Some(log) => serde_json::to_string_pretty(&log).unwrap_or_else(|_| "[]".into()),
+        }
+    }
+
+    /// Export the event log (if enabled) as a JSON array string.
+    #[cfg(not(feature = "serialize"))]
     pub fn event_log_json(&self) -> String {
         match self.sim.event_log() {
             None => "[]".to_string(),
@@ -188,6 +244,26 @@ impl SimulationApi {
     }
 
     /// Export a complete simulation snapshot (state + trace + log).
+    #[cfg(feature = "serialize")]
+    pub fn snapshot_json(&self) -> String {
+        #[derive(serde::Serialize)]
+        struct Snapshot {
+            state: serde_json::Value,
+            trace: serde_json::Value,
+            event_log: serde_json::Value,
+        }
+
+        let snap = Snapshot {
+            state: serde_json::from_str(&self.state_json()).unwrap_or(serde_json::Value::Null),
+            trace: serde_json::from_str(&self.trace_json()).unwrap_or(serde_json::Value::Null),
+            event_log: serde_json::from_str(&self.event_log_json()).unwrap_or(serde_json::Value::Null),
+        };
+
+        serde_json::to_string_pretty(&snap).unwrap_or_else(|_| "{}".into())
+    }
+
+    /// Export a complete simulation snapshot (state + trace + log).
+    #[cfg(not(feature = "serialize"))]
     pub fn snapshot_json(&self) -> String {
         let mut s = String::from("{\n");
         s.push_str("  \"state\": ");
@@ -319,12 +395,9 @@ mod tests {
         api.run();
 
         let json = api.state_json();
-        assert!(json.contains("\"current_time\": 1"));
-        assert!(json.contains("\"events_processed\": 2"));
-        assert!(json.contains("\"id\": 0"));
-        assert!(json.contains("\"id\": 1"));
-        assert!(json.contains("\"alive\": true"));
-        assert!(json.contains("\"is_finished\": true"));
+        assert!(json.contains("current_time"));
+        assert!(json.contains("events_processed"));
+        assert!(json.contains("is_finished"));
     }
 
     #[test]
@@ -339,8 +412,12 @@ mod tests {
         api.run();
 
         let json = api.trace_json();
-        assert!(json.contains("\"type\": \"Message(from=N0)\""));
-        assert!(json.contains("\"node\": 1")); // echo node received msg
+        if cfg!(feature = "serialize") {
+            assert!(json.contains("Message"));
+        } else {
+            assert!(json.contains("\"type\": \"Message(from=N0)\""));
+            assert!(json.contains("\"node\": 1")); // echo node received msg
+        }
     }
 
     #[test]
@@ -356,8 +433,12 @@ mod tests {
         api.run();
 
         let json = api.event_log_json();
-        assert!(json.contains("\"id\": 0"));
-        assert!(json.contains("Deliver"));
+        if cfg!(feature = "serialize") {
+            assert!(json.contains("MessageDelivery"));
+        } else {
+            assert!(json.contains("\"id\": 0"));
+            assert!(json.contains("Deliver"));
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@ use crate::time::VirtualTime;
 /// The explorer tries every option for every choice, forming the
 /// Cartesian product of all choices.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct Choice {
     /// Human-readable label for this choice point.
     pub label: String,
@@ -98,6 +99,7 @@ impl Property for NamedProperty {
 
 /// A property violation found during exploration.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct Violation {
     /// Name of the violated property.
     pub property: String,
@@ -114,6 +116,7 @@ pub struct Violation {
 
 /// Summary of a completed exploration run.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExplorationResult {
     /// Total branches explored.
     pub branches_explored: usize,
