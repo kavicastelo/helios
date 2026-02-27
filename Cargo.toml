@@ -3,10 +3,18 @@ name = "helios"
 version = "0.1.0"
 edition = "2021"
 description = "Deterministic distributed systems simulator"
+authors = ["Helios Contributors"]
+license = "MIT"
+repository = "https://github.com/kavicastelo/helios"
+keywords = ["simulation", "distributed-systems", "deterministic", "wasm"]
+categories = ["simulation", "development-tools::testing"]
 
 [features]
 default = []
-wasm = ["dep:wasm-bindgen", "dep:serde", "dep:serde_json", "dep:console_error_panic_hook"]
+# Enable serde Serialize/Deserialize on all core types.
+serialize = ["dep:serde", "dep:serde_json"]
+# Enable WebAssembly bindings (implies serialize for JSON export).
+wasm = ["serialize", "dep:wasm-bindgen", "dep:console_error_panic_hook"]
 
 [dependencies]
 wasm-bindgen = { version = "0.2", optional = true }
@@ -16,3 +24,8 @@ console_error_panic_hook = { version = "0.1", optional = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "helios-demo"
+path = "src/main.rs"
+

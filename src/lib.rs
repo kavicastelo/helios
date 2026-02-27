@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod dsl;
+pub mod error;
 pub mod event;
 pub mod eventlog;
 pub mod explorer;
@@ -26,6 +27,7 @@ pub use network::{DeterministicRng, Network, NetworkConfig, NetworkDecision};
 pub use node::{
     EchoNode, MessagePayload, NodeEvent, NodeId, NodeRuntime, PingNode, SimNode, TraceEntry,
 };
+pub use error::{HeliosError, HeliosResult};
 pub use scheduler::Scheduler;
 pub use simulation::{EventHandler, Simulation, SimulationContext};
 pub use time::VirtualTime;
